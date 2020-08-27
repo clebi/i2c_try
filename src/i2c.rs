@@ -1,14 +1,24 @@
 use cast::u8;
 
+use core::fmt;
 use stm32f3xx_hal::gpio::gpiob::{PB6, PB7};
 use stm32f3xx_hal::gpio::AF4;
 use stm32f3xx_hal::pac::I2C1;
 use stm32f3xx_hal::rcc::{Clocks, APB1};
 use stm32f3xx_hal::time::Hertz;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum TxState {
-    None,
+#[derive(Debug)]
+pub enum I2cError {
+    DeviceBusy,
+    Nack,
+    BusError,
+    ArbitrationLoss,
+    Overrun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Idle,
     TxStart,
     TxReady,
     TxSent,
@@ -17,12 +27,29 @@ pub enum TxState {
     TxNack,
 }
 
+impl core::fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// I2c1 provides interface to communicate with i2c devices.
 pub struct I2c1 {
     dev: I2C1,
-    tx_state: TxState,
+    state: State,
+    pub last_error: Option<I2cError>,
+    tx_ind: usize,
+    tx_buf: Option<&'static [u8]>,
 }
 
 impl I2c1 {
+    /// Creates the new i2c device.
+    ///
+    /// # Arguments
+    /// * `i2c` - i2c device.
+    /// * `freq` - frequency for the device.
+    /// * `clocks` - systel clocks.
+    /// * `apb1` - APB1 register.
     pub fn new(
         i2c: I2C1,
         _: (PB6<AF4>, PB7<AF4>),
@@ -110,13 +137,22 @@ impl I2c1 {
 
         I2c1 {
             dev: i2c,
-            tx_state: TxState::None,
+            state: State::Idle,
+            last_error: None,
+            tx_ind: 0,
+            tx_buf: Option::None,
         }
     }
 
+    /// Enable the i2c device.
     pub fn enable(&mut self) {
         // Enable the peripheral
         self.dev.cr1.modify(|_, w| w.pe().set_bit());
+    }
+
+    /// Disable the i2c device.
+    pub fn disable(&mut self) {
+        self.dev.cr1.modify(|_, w| w.pe().disabled());
     }
 
     pub fn enable_interrupts(&mut self) {
@@ -136,7 +172,26 @@ impl I2c1 {
         });
     }
 
-    pub fn write_start(&mut self, addr: u8, n_bytes: u8) {
+    /// Write bytes through i2c.
+    ///
+    /// # Arguments
+    /// * `addr` - Destination address.
+    /// * `bytes` - Bytes to send.
+    ///
+    /// # Errors
+    /// * `I2cError::DeviceBusy` if the device is already busy.
+    pub fn write(&mut self, addr: u8, bytes: &'static [u8]) -> Result<(), I2cError> {
+        if self.is_busy() {
+            self.last_error = Some(I2cError::DeviceBusy);
+            return Err(I2cError::DeviceBusy);
+        }
+        self.tx_ind = 0;
+        self.tx_buf = Some(bytes);
+        self.write_start(addr, bytes.len() as u8);
+        Ok(())
+    }
+
+    fn write_start(&mut self, addr: u8, n_bytes: u8) {
         self.dev.cr2.modify(|_, w| {
             w.sadd()
                 .bits(u16::from(addr << 1))
@@ -149,44 +204,86 @@ impl I2c1 {
                 .autoend()
                 .automatic()
         });
-        self.tx_state = TxState::TxStart;
+        self.state = State::TxStart;
     }
 
-    pub fn isr_state(&mut self) -> TxState {
-        let isr = self.dev.isr.read();
-        if isr.nackf().bit() {
-            self.tx_state = TxState::TxReady;
-        } else if isr.stopf().bit() {
-            self.tx_state = TxState::TxStop;
-        } else if isr.tc().bit() {
-            self.tx_state = TxState::TxComplete;
-        } else if isr.txis().bit() && isr.txe().bit() {
-            self.tx_state = TxState::TxReady;
+    /// This function must be called when there is an interruption on i2c device.
+    /// It will compute the current state based on ISR register and execute work based on the state.
+    pub fn interrupt(&mut self) {
+        let isr_state = self.isr_state();
+        match isr_state {
+            Ok(State::TxReady) => {
+                self.tx_buf
+                    .map(|buf| self.write_tx_buffer(buf[self.tx_ind]));
+                self.tx_ind += 1;
+            }
+            Ok(State::TxStop) => {
+                self.tx_ind = 0;
+            }
+            Ok(State::TxNack) => {
+                self.tx_ind = 0;
+                self.last_error = Some(I2cError::Nack);
+            }
+            Err(err) => {
+                self.last_error = Some(err);
+            }
+            _ => {}
         }
-        self.tx_state
     }
 
-    pub fn write_tx_buffer(&mut self, byte: u8) {
+    fn isr_state(&mut self) -> Result<State, I2cError> {
+        let isr = self.dev.isr.read();
+        if isr.berr().bit() {
+            self.dev.icr.write(|w| w.berrcf().bit(true));
+            return Err(I2cError::BusError);
+        } else if isr.arlo().bit() {
+            self.dev.icr.write(|w| w.arlocf().bit(true));
+            return Err(I2cError::ArbitrationLoss);
+        } else if isr.ovr().bit() {
+            self.dev.icr.write(|w| w.ovrcf().bit(true));
+            return Err(I2cError::Overrun);
+        }
+        if isr.nackf().bit() {
+            self.dev.icr.write(|w| w.nackcf().bit(true));
+            self.state = State::TxNack;
+        } else if isr.stopf().bit() {
+            self.dev.icr.write(|w| w.stopcf().bit(true));
+            self.state = State::TxStop;
+        } else if isr.tc().bit() {
+            self.state = State::TxComplete;
+        } else if isr.txis().bit() && isr.txe().bit() {
+            self.state = State::TxReady;
+        } else {
+            self.state = State::Idle;
+        }
+        Ok(self.state)
+    }
+
+    fn write_tx_buffer(&mut self, byte: u8) {
         self.dev.txdr.write(|w| w.txdata().bits(byte));
-        self.tx_state = TxState::TxSent;
+        self.state = State::TxSent;
     }
 
-    pub fn get_tx_state(&self) -> TxState {
-        self.tx_state
+    fn is_busy(&mut self) -> bool {
+        self.dev.isr.read().busy().bit()
     }
 
+    /// Get the state of the device.
+    pub fn get_tx_state(&self) -> State {
+        self.state
+    }
+
+    /// Set the device state to idle.
     pub fn reset_tx_state(&mut self) {
-        self.tx_state = TxState::None;
+        self.state = State::Idle;
     }
 
-    pub fn clear_stop_int(&mut self) {
-        self.dev.icr.write(|w| w.stopcf().bit(true));
-    }
-
+    /// Debug function which returns the content of the ISR register.
     pub fn get_isr(&self) -> u32 {
         self.dev.isr.read().bits()
     }
 
+    /// Debug function which returns the content of the txdr register.
     pub fn get_txdr(&self) -> u32 {
         self.dev.txdr.read().bits()
     }

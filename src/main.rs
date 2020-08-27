@@ -12,20 +12,11 @@ extern crate stm32f3xx_hal;
 mod i2c;
 
 use cortex_m_semihosting::hprintln;
-use i2c::{I2c1, TxState};
+use i2c::{I2c1, State};
 use stm32f3xx_hal::prelude::*;
 
-fn tx_state_str(state: TxState) -> &'static str {
-    match state {
-        TxState::None => "None",
-        TxState::TxStart => "TxStart",
-        TxState::TxReady => "TxReady",
-        TxState::TxSent => "TxSent",
-        TxState::TxComplete => "TxComplete",
-        TxState::TxStop => "TxStop",
-        TxState::TxNack => "TxNack",
-    }
-}
+const I2C_LSM_ADDR: u8 = 0b0011110;
+const LSM_ENABLE_WRITE: [u8; 2] = [0, 0b0001000];
 
 #[rtic::app(device = stm32f3xx_hal::pac, peripherals = true)]
 const APP: () = {
@@ -62,16 +53,20 @@ const APP: () = {
     fn idle(mut cx: idle::Context) -> ! {
         hprintln!("write to i2c1 device : 0b0011110",).unwrap();
         cx.resources.i2c1.lock(|i2c1| {
-            i2c1.write_start(0b0011110, 1);
+            i2c1.write(I2C_LSM_ADDR, &LSM_ENABLE_WRITE).unwrap();
         });
         loop {
             cx.resources
                 .i2c1
                 .lock(|i2c1: &mut I2c1| match i2c1.get_tx_state() {
-                    TxState::None => {}
-                    TxState::TxStop => {
-                        hprintln!("idle: tx stop, end !!!").unwrap();
+                    State::Idle => {}
+                    State::TxStop => {
+                        match i2c1.last_error {
+                            Some(_) => hprintln!("idle: tx stop with error !!!").unwrap(),
+                            None => hprintln!("idle: tx stop, end.").unwrap(),
+                        }
                         i2c1.reset_tx_state();
+                        i2c1.disable();
                     }
                     _ => {
                         hprintln!("idle: isr state not managed").unwrap();
@@ -83,25 +78,15 @@ const APP: () = {
     #[task(binds = I2C1_EV_EXTI23, resources = [i2c1])]
     fn i2c1_ev(cx: i2c1_ev::Context) {
         let i2c1: &mut I2c1 = cx.resources.i2c1;
-        hprintln!("i2c1 tx state = {}", tx_state_str(i2c1.get_tx_state())).unwrap();
-        hprintln!("I2C1_EV: 0b{:032b}", i2c1.get_isr()).unwrap();
-        let isr_state = i2c1.isr_state();
-        match isr_state {
-            TxState::TxReady => {
-                hprintln!("I2C1_EV: write buffer is ready").unwrap();
-                i2c1.write_tx_buffer(0);
-            }
-            TxState::TxStop => {
-                hprintln!("I2C1_EV: write end").unwrap();
-                i2c1.clear_stop_int();
-            }
-            _ => hprintln!("I2C1_EV: isr state not managed").unwrap(),
-        }
+        hprintln!("i2c1 tx state = {}", i2c1.get_tx_state()).unwrap();
+        // hprintln!("I2C1_EV: {:#032b}", i2c1.get_isr()).unwrap();
+        i2c1.interrupt();
     }
 
     #[task(binds = I2C1_ER, resources = [i2c1])]
     fn i2c1_er(cx: i2c1_er::Context) {
-        let _: &mut I2c1 = cx.resources.i2c1;
+        let i2c1: &mut I2c1 = cx.resources.i2c1;
         hprintln!("I2C1 ER").unwrap();
+        i2c1.interrupt();
     }
 };
