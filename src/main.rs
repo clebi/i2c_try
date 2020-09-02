@@ -16,7 +16,46 @@ use i2c::{I2c1, State};
 use stm32f3xx_hal::prelude::*;
 
 const I2C_LSM_ADDR: u8 = 0b0011110;
-const LSM_ENABLE_WRITE: [u8; 2] = [0, 0b0001000];
+const LSM_MAG_CONTINOUS: [u8; 2] = [0x02, 0b00];
+const LSM_ENABLE_WRITE: [u8; 2] = [0, 0b10010000];
+const LSM_MAG_TEMP_H_REG_WRITE: [u8; 1] = [0x31];
+// const LSM_MAG_TEMP_L_REG_WRITE: [u8; 1] = [0x32];
+
+const LSM_MAG_TEMP_READ: [u8; 1] = [1];
+
+struct I2cTask {
+    pub mode: u8,
+    pub stop: bool,
+    pub addr: u8,
+    pub buf: &'static [u8],
+}
+
+const TASKS: [I2cTask; 4] = [
+    I2cTask {
+        mode: 0,
+        stop: true,
+        addr: I2C_LSM_ADDR,
+        buf: &LSM_MAG_CONTINOUS,
+    },
+    I2cTask {
+        mode: 0,
+        stop: true,
+        addr: I2C_LSM_ADDR,
+        buf: &LSM_ENABLE_WRITE,
+    },
+    I2cTask {
+        mode: 0,
+        stop: false,
+        addr: I2C_LSM_ADDR,
+        buf: &LSM_MAG_TEMP_H_REG_WRITE,
+    },
+    I2cTask {
+        mode: 1,
+        stop: true,
+        addr: I2C_LSM_ADDR,
+        buf: &LSM_MAG_TEMP_READ,
+    },
+];
 
 #[rtic::app(device = stm32f3xx_hal::pac, peripherals = true)]
 const APP: () = {
@@ -51,26 +90,50 @@ const APP: () = {
 
     #[idle(resources = [i2c1])]
     fn idle(mut cx: idle::Context) -> ! {
+        let mut task_index = 0;
+        let mut task_running = false;
         hprintln!("write to i2c1 device : 0b0011110",).unwrap();
-        cx.resources.i2c1.lock(|i2c1| {
-            i2c1.write(I2C_LSM_ADDR, &LSM_ENABLE_WRITE).unwrap();
-        });
         loop {
+            if !task_running && task_index < TASKS.len() {
+                let task = &TASKS[task_index];
+                match task.mode {
+                    0 => {
+                        task_running = true;
+                        hprintln!("idle: task : {} send to {:#08b} !!!", task_index, task.addr)
+                            .unwrap();
+                        for byte in task.buf {
+                            hprintln!("idle: send buf: {:#08b}", byte).unwrap();
+                        }
+                        cx.resources.i2c1.lock(|i2c1: &mut I2c1| {
+                            i2c1.write(task.addr, task.stop, task.buf).unwrap();
+                        });
+                    }
+                    _ => hprintln!("idle: task mode unknown !!!").unwrap(),
+                }
+                task_index += 1;
+            }
             cx.resources
                 .i2c1
-                .lock(|i2c1: &mut I2c1| match i2c1.get_tx_state() {
-                    State::Idle => {}
-                    State::TxStop => {
-                        match i2c1.last_error {
-                            Some(_) => hprintln!("idle: tx stop with error !!!").unwrap(),
-                            None => hprintln!("idle: tx stop, end.").unwrap(),
+                .lock(|i2c1: &mut I2c1| match i2c1.last_error {
+                    Some(_) => hprintln!("idle: tx stop with error !!!").unwrap(),
+                    None => match i2c1.get_tx_state() {
+                        State::Idle => {}
+                        State::TxStop => {
+                            i2c1.reset_state();
+                            task_running = false;
                         }
-                        i2c1.reset_tx_state();
-                        i2c1.disable();
-                    }
-                    _ => {
-                        hprintln!("idle: isr state not managed").unwrap();
-                    }
+                        State::RxStop => {
+                            let buf = i2c1.get_rx_buf(2);
+                            for byte in buf {
+                                hprintln!("idle: rx stop: buf: {:#08b}", byte).unwrap();
+                            }
+                            i2c1.reset_state();
+                            task_running = false;
+                        }
+                        _ => {
+                            hprintln!("idle: isr state not managed").unwrap();
+                        }
+                    },
                 });
         }
     }
@@ -78,9 +141,12 @@ const APP: () = {
     #[task(binds = I2C1_EV_EXTI23, resources = [i2c1])]
     fn i2c1_ev(cx: i2c1_ev::Context) {
         let i2c1: &mut I2c1 = cx.resources.i2c1;
-        hprintln!("i2c1 tx state = {}", i2c1.get_tx_state()).unwrap();
-        // hprintln!("I2C1_EV: {:#032b}", i2c1.get_isr()).unwrap();
+        hprintln!("I2C1_EV: {:#016b}", i2c1.get_isr()).unwrap();
         i2c1.interrupt();
+        hprintln!("i2c1 tx state = {}", i2c1.get_tx_state()).unwrap();
+        if i2c1.get_tx_state() == State::TxComplete {
+            i2c1.read(I2C_LSM_ADDR, 2).unwrap();
+        }
     }
 
     #[task(binds = I2C1_ER, resources = [i2c1])]

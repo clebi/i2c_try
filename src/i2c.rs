@@ -7,13 +7,14 @@ use stm32f3xx_hal::pac::I2C1;
 use stm32f3xx_hal::rcc::{Clocks, APB1};
 use stm32f3xx_hal::time::Hertz;
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum I2cError {
     DeviceBusy,
     Nack,
     BusError,
     ArbitrationLoss,
     Overrun,
+    StateError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,9 @@ pub enum State {
     TxSent,
     TxComplete,
     TxStop,
+    RxStart,
+    RxReady,
+    RxStop,
     TxNack,
 }
 
@@ -40,6 +44,8 @@ pub struct I2c1 {
     pub last_error: Option<I2cError>,
     tx_ind: usize,
     tx_buf: Option<&'static [u8]>,
+    rx_ind: usize,
+    rx_buf: [u8; 256],
 }
 
 impl I2c1 {
@@ -140,7 +146,9 @@ impl I2c1 {
             state: State::Idle,
             last_error: None,
             tx_ind: 0,
-            tx_buf: Option::None,
+            tx_buf: None,
+            rx_ind: 0,
+            rx_buf: [0; 256],
         }
     }
 
@@ -153,6 +161,7 @@ impl I2c1 {
     /// Disable the i2c device.
     pub fn disable(&mut self) {
         self.dev.cr1.modify(|_, w| w.pe().disabled());
+        self.last_error = None;
     }
 
     pub fn enable_interrupts(&mut self) {
@@ -180,18 +189,23 @@ impl I2c1 {
     ///
     /// # Errors
     /// * `I2cError::DeviceBusy` if the device is already busy.
-    pub fn write(&mut self, addr: u8, bytes: &'static [u8]) -> Result<(), I2cError> {
+    pub fn write(
+        &mut self,
+        addr: u8,
+        auto_stop: bool,
+        bytes: &'static [u8],
+    ) -> Result<(), I2cError> {
         if self.is_busy() {
             self.last_error = Some(I2cError::DeviceBusy);
             return Err(I2cError::DeviceBusy);
         }
         self.tx_ind = 0;
         self.tx_buf = Some(bytes);
-        self.write_start(addr, bytes.len() as u8);
+        self.write_start(addr, bytes.len() as u8, auto_stop);
         Ok(())
     }
 
-    fn write_start(&mut self, addr: u8, n_bytes: u8) {
+    fn write_start(&mut self, addr: u8, n_bytes: u8, auto_stop: bool) {
         self.dev.cr2.modify(|_, w| {
             w.sadd()
                 .bits(u16::from(addr << 1))
@@ -202,9 +216,26 @@ impl I2c1 {
                 .start()
                 .start()
                 .autoend()
-                .automatic()
+                .bit(auto_stop)
         });
         self.state = State::TxStart;
+    }
+
+    pub fn read(&mut self, addr: u8, len: usize) -> Result<(), I2cError> {
+        self.dev.cr2.modify(|_, w| {
+            w.sadd()
+                .bits(u16::from(addr << 1))
+                .rd_wrn()
+                .read()
+                .nbytes()
+                .bits(len as u8)
+                .start()
+                .start()
+                .autoend()
+                .automatic()
+        });
+        self.state = State::RxStart;
+        Ok(())
     }
 
     /// This function must be called when there is an interruption on i2c device.
@@ -214,11 +245,23 @@ impl I2c1 {
         match isr_state {
             Ok(State::TxReady) => {
                 self.tx_buf
-                    .map(|buf| self.write_tx_buffer(buf[self.tx_ind]));
+                    .map(|buf| {
+                        self.write_tx_buffer(buf[self.tx_ind])
+                    });
                 self.tx_ind += 1;
+            }
+            Ok(State::RxReady) => {
+                self.rx_buf[self.rx_ind] = self.dev.rxdr.read().rxdata().bits();
+                self.rx_ind += 1;
             }
             Ok(State::TxStop) => {
                 self.tx_ind = 0;
+            }
+            Ok(State::TxComplete) => {
+                self.tx_ind = 0;
+            }
+            Ok(State::RxStop) => {
+                self.rx_ind = 0;
             }
             Ok(State::TxNack) => {
                 self.tx_ind = 0;
@@ -246,15 +289,19 @@ impl I2c1 {
         if isr.nackf().bit() {
             self.dev.icr.write(|w| w.nackcf().bit(true));
             self.state = State::TxNack;
-        } else if isr.stopf().bit() {
-            self.dev.icr.write(|w| w.stopcf().bit(true));
-            self.state = State::TxStop;
         } else if isr.tc().bit() {
             self.state = State::TxComplete;
         } else if isr.txis().bit() && isr.txe().bit() {
             self.state = State::TxReady;
-        } else {
-            self.state = State::Idle;
+        } else if isr.rxne().bit() {
+            self.state = State::RxReady;
+        } else if isr.stopf().bit() {
+            self.dev.icr.write(|w| w.stopcf().bit(true));
+            self.state = match self.state {
+                State::TxSent => State::TxStop,
+                State::RxReady => State::RxStop,
+                _ => return Err(I2cError::StateError),
+            }
         }
         Ok(self.state)
     }
@@ -273,8 +320,12 @@ impl I2c1 {
         self.state
     }
 
+    pub fn get_rx_buf(&self, len: usize) -> &[u8] {
+        self.rx_buf.split_at(len).0
+    }
+
     /// Set the device state to idle.
-    pub fn reset_tx_state(&mut self) {
+    pub fn reset_state(&mut self) {
         self.state = State::Idle;
     }
 
