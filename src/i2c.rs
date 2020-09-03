@@ -7,16 +7,19 @@ use stm32f3xx_hal::pac::I2C1;
 use stm32f3xx_hal::rcc::{Clocks, APB1};
 use stm32f3xx_hal::time::Hertz;
 
+/// I2c errors.
 #[derive(Debug, Copy, Clone)]
 pub enum I2cError {
-    DeviceBusy,
-    Nack,
+    DeviceBusy, // Device is busy, can't start something else
+    Nack,       // received a nack
     BusError,
     ArbitrationLoss,
     Overrun,
-    StateError,
+    StateError, // unable to compute the stop state because previous state was not expected
+    TransferCompleteNoRead, // Tranfer complete status but nothing do do next
 }
 
+/// State of i2c communication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Idle,
@@ -41,11 +44,14 @@ impl core::fmt::Display for State {
 pub struct I2c1 {
     dev: I2C1,
     state: State,
+    /// Last error that happened on i2c communications.
     pub last_error: Option<I2cError>,
+    current_write_addr: Option<u8>,
     tx_ind: usize,
     tx_buf: Option<&'static [u8]>,
     rx_ind: usize,
-    rx_buf: [u8; 256],
+    rx_buf: [u8; 256], // for now use a static buffer here.
+    recv: Option<(u8, usize)>,
 }
 
 impl I2c1 {
@@ -145,10 +151,12 @@ impl I2c1 {
             dev: i2c,
             state: State::Idle,
             last_error: None,
+            current_write_addr: None,
             tx_ind: 0,
             tx_buf: None,
             rx_ind: 0,
             rx_buf: [0; 256],
+            recv: None,
         }
     }
 
@@ -164,6 +172,7 @@ impl I2c1 {
         self.last_error = None;
     }
 
+    /// Enables all interrupts for i2c device.
     pub fn enable_interrupts(&mut self) {
         self.dev.cr1.modify(|_, w| {
             w.errie()
@@ -181,7 +190,25 @@ impl I2c1 {
         });
     }
 
-    /// Write bytes through i2c.
+    /// Disables all interrupts for i2c device.
+    pub fn disable_interrupts(&mut self) {
+        self.dev.cr1.modify(|_, w| {
+            w.errie()
+                .disabled()
+                .tcie()
+                .disabled()
+                .stopie()
+                .disabled()
+                .nackie()
+                .disabled()
+                .rxie()
+                .disabled()
+                .txie()
+                .disabled()
+        });
+    }
+
+    /// Write bytes through i2c. Supports only write < 256 bytes.
     ///
     /// # Arguments
     /// * `addr` - Destination address.
@@ -189,12 +216,20 @@ impl I2c1 {
     ///
     /// # Errors
     /// * `I2cError::DeviceBusy` if the device is already busy.
-    pub fn write(
-        &mut self,
-        addr: u8,
-        auto_stop: bool,
-        bytes: &'static [u8],
-    ) -> Result<(), I2cError> {
+    pub fn write(&mut self, addr: u8, bytes: &'static [u8]) -> Result<(), I2cError> {
+        self._write(addr, true, bytes)
+    }
+
+    /// Write bytes through i2c. Supports only write < 256 bytes.
+    ///
+    /// # Arguments
+    /// * `addr` - Destination address.
+    /// * `auto_stop` - i2c autostop enabled.
+    /// * `bytes` - Bytes to send.
+    ///
+    /// # Errors
+    /// * `I2cError::DeviceBusy` if the device is already busy.
+    fn _write(&mut self, addr: u8, auto_stop: bool, bytes: &'static [u8]) -> Result<(), I2cError> {
         if self.is_busy() {
             self.last_error = Some(I2cError::DeviceBusy);
             return Err(I2cError::DeviceBusy);
@@ -205,7 +240,14 @@ impl I2c1 {
         Ok(())
     }
 
+    /// Start a write sequence on i2c channel.
+    ///
+    /// # Arguments
+    /// * `addr` - Destination address.
+    /// * `n_bytes` - number of bytes which will be sent.
+    /// * `auto_stop` - i2c autostop enabled.
     fn write_start(&mut self, addr: u8, n_bytes: u8, auto_stop: bool) {
+        self.current_write_addr = Some(addr);
         self.dev.cr2.modify(|_, w| {
             w.sadd()
                 .bits(u16::from(addr << 1))
@@ -221,7 +263,12 @@ impl I2c1 {
         self.state = State::TxStart;
     }
 
-    pub fn read(&mut self, addr: u8, len: usize) -> Result<(), I2cError> {
+    /// Reads from i2c interface. Supports only read < 256 bytes.
+    ///
+    /// # Arguments
+    /// * `addr` - Destination address.
+    /// * `len` - number of bytes to read.
+    pub fn read(&mut self, addr: u8, len: usize) {
         self.dev.cr2.modify(|_, w| {
             w.sadd()
                 .bits(u16::from(addr << 1))
@@ -235,7 +282,31 @@ impl I2c1 {
                 .automatic()
         });
         self.state = State::RxStart;
-        Ok(())
+    }
+
+    /// Write bytes through i2c. Supports only write and read < 256 bytes.
+    ///
+    /// # Arguments
+    /// * `addr` - Destination address.
+    /// * `bytes` - Bytes to send.
+    /// * `recv_len` - Number of bytes to receive.
+    ///
+    /// # Errors
+    /// * `I2cError::DeviceBusy` if the device is already busy.
+    pub fn write_read(
+        &mut self,
+        addr: u8,
+        bytes: &'static [u8],
+        recv_len: usize,
+    ) -> Result<(), I2cError> {
+        self.recv = Some((addr, recv_len));
+        self._write(addr, false, bytes)
+    }
+
+    pub fn stop(&mut self, addr: u8) {
+        self.dev
+            .cr2
+            .modify(|_, w| w.sadd().bits(u16::from(addr << 1)).stop().stop());
     }
 
     /// This function must be called when there is an interruption on i2c device.
@@ -245,9 +316,7 @@ impl I2c1 {
         match isr_state {
             Ok(State::TxReady) => {
                 self.tx_buf
-                    .map(|buf| {
-                        self.write_tx_buffer(buf[self.tx_ind])
-                    });
+                    .map(|buf| self.write_tx_buffer(buf[self.tx_ind]));
                 self.tx_ind += 1;
             }
             Ok(State::RxReady) => {
@@ -256,9 +325,22 @@ impl I2c1 {
             }
             Ok(State::TxStop) => {
                 self.tx_ind = 0;
+                self.current_write_addr = None;
             }
             Ok(State::TxComplete) => {
                 self.tx_ind = 0;
+                self.last_error = self.recv.map_or_else(
+                    || Some(I2cError::TransferCompleteNoRead),
+                    |recv| {
+                        self.read(recv.0, recv.1);
+                        None
+                    },
+                );
+                // if there was an error send a stop
+                if self.last_error.is_some() {
+                    self.current_write_addr.map(|addr| self.stop(addr));
+                }
+                self.current_write_addr = None;
             }
             Ok(State::RxStop) => {
                 self.rx_ind = 0;
@@ -266,14 +348,17 @@ impl I2c1 {
             Ok(State::TxNack) => {
                 self.tx_ind = 0;
                 self.last_error = Some(I2cError::Nack);
+                self.current_write_addr = None;
             }
             Err(err) => {
                 self.last_error = Some(err);
+                self.current_write_addr = None;
             }
             _ => {}
         }
     }
 
+    /// Computes the states based on IRS register.
     fn isr_state(&mut self) -> Result<State, I2cError> {
         let isr = self.dev.isr.read();
         if isr.berr().bit() {
@@ -296,9 +381,10 @@ impl I2c1 {
         } else if isr.rxne().bit() {
             self.state = State::RxReady;
         } else if isr.stopf().bit() {
+            // clear stop bit once read
             self.dev.icr.write(|w| w.stopcf().bit(true));
             self.state = match self.state {
-                State::TxSent => State::TxStop,
+                State::TxSent | State::TxComplete => State::TxStop,
                 State::RxReady => State::RxStop,
                 _ => return Err(I2cError::StateError),
             }
@@ -306,12 +392,16 @@ impl I2c1 {
         Ok(self.state)
     }
 
+    /// Write a bute into the tx buffer.
     fn write_tx_buffer(&mut self, byte: u8) {
         self.dev.txdr.write(|w| w.txdata().bits(byte));
         self.state = State::TxSent;
     }
 
-    fn is_busy(&mut self) -> bool {
+    /// Is the device Budy ?
+    /// # Returns
+    /// true if budy, false if not.
+    pub fn is_busy(&mut self) -> bool {
         self.dev.isr.read().busy().bit()
     }
 
@@ -320,6 +410,13 @@ impl I2c1 {
         self.state
     }
 
+    /// Get the content of the receive buffer.
+    ///
+    /// # Arguments
+    /// * `len` - len of the slice to get.
+    ///
+    /// # Returns
+    /// A slice containing of the rx buffer.
     pub fn get_rx_buf(&self, len: usize) -> &[u8] {
         self.rx_buf.split_at(len).0
     }
@@ -327,15 +424,13 @@ impl I2c1 {
     /// Set the device state to idle.
     pub fn reset_state(&mut self) {
         self.state = State::Idle;
+        self.last_error = None;
+        self.tx_buf = None;
+        self.recv = None;
     }
 
     /// Debug function which returns the content of the ISR register.
     pub fn get_isr(&self) -> u32 {
         self.dev.isr.read().bits()
-    }
-
-    /// Debug function which returns the content of the txdr register.
-    pub fn get_txdr(&self) -> u32 {
-        self.dev.txdr.read().bits()
     }
 }

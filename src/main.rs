@@ -21,39 +21,36 @@ const LSM_ENABLE_WRITE: [u8; 2] = [0, 0b10010000];
 const LSM_MAG_TEMP_H_REG_WRITE: [u8; 1] = [0x31];
 // const LSM_MAG_TEMP_L_REG_WRITE: [u8; 1] = [0x32];
 
-const LSM_MAG_TEMP_READ: [u8; 1] = [1];
+enum TaskMode {
+    Write,
+    // Read,
+    WriteRead,
+}
 
 struct I2cTask {
-    pub mode: u8,
-    pub stop: bool,
+    pub mode: TaskMode,
     pub addr: u8,
     pub buf: &'static [u8],
 }
 
-const TASKS: [I2cTask; 4] = [
+const TASKS: [I2cTask; 3] = [
     I2cTask {
-        mode: 0,
-        stop: true,
+        // Configure magnetic sensor operating mode to continuous mode
+        mode: TaskMode::Write,
         addr: I2C_LSM_ADDR,
         buf: &LSM_MAG_CONTINOUS,
     },
     I2cTask {
-        mode: 0,
-        stop: true,
+        // Enable temperature sensor
+        mode: TaskMode::Write,
         addr: I2C_LSM_ADDR,
         buf: &LSM_ENABLE_WRITE,
     },
     I2cTask {
-        mode: 0,
-        stop: false,
+        // Read the content of temperature output register
+        mode: TaskMode::WriteRead,
         addr: I2C_LSM_ADDR,
         buf: &LSM_MAG_TEMP_H_REG_WRITE,
-    },
-    I2cTask {
-        mode: 1,
-        stop: true,
-        addr: I2C_LSM_ADDR,
-        buf: &LSM_MAG_TEMP_READ,
     },
 ];
 
@@ -97,7 +94,7 @@ const APP: () = {
             if !task_running && task_index < TASKS.len() {
                 let task = &TASKS[task_index];
                 match task.mode {
-                    0 => {
+                    TaskMode::Write => {
                         task_running = true;
                         hprintln!("idle: task : {} send to {:#08b} !!!", task_index, task.addr)
                             .unwrap();
@@ -105,17 +102,31 @@ const APP: () = {
                             hprintln!("idle: send buf: {:#08b}", byte).unwrap();
                         }
                         cx.resources.i2c1.lock(|i2c1: &mut I2c1| {
-                            i2c1.write(task.addr, task.stop, task.buf).unwrap();
+                            i2c1.write(task.addr, task.buf).unwrap();
                         });
                     }
-                    _ => hprintln!("idle: task mode unknown !!!").unwrap(),
+                    TaskMode::WriteRead => {
+                        task_running = true;
+                        hprintln!(
+                            "idle: task : {} write read from {:#08b} !!!",
+                            task_index,
+                            task.addr
+                        )
+                        .unwrap();
+                        cx.resources.i2c1.lock(|i2c1: &mut I2c1| {
+                            i2c1.write_read(task.addr, task.buf, 1).unwrap();
+                        });
+                    }
                 }
                 task_index += 1;
             }
             cx.resources
                 .i2c1
                 .lock(|i2c1: &mut I2c1| match i2c1.last_error {
-                    Some(_) => hprintln!("idle: tx stop with error !!!").unwrap(),
+                    Some(_) => {
+                        hprintln!("idle: stop with error !!!").unwrap();
+                        i2c1.reset_state();
+                    }
                     None => match i2c1.get_tx_state() {
                         State::Idle => {}
                         State::TxStop => {
@@ -123,7 +134,7 @@ const APP: () = {
                             task_running = false;
                         }
                         State::RxStop => {
-                            let buf = i2c1.get_rx_buf(2);
+                            let buf = i2c1.get_rx_buf(1);
                             for byte in buf {
                                 hprintln!("idle: rx stop: buf: {:#08b}", byte).unwrap();
                             }
@@ -144,9 +155,6 @@ const APP: () = {
         hprintln!("I2C1_EV: {:#016b}", i2c1.get_isr()).unwrap();
         i2c1.interrupt();
         hprintln!("i2c1 tx state = {}", i2c1.get_tx_state()).unwrap();
-        if i2c1.get_tx_state() == State::TxComplete {
-            i2c1.read(I2C_LSM_ADDR, 2).unwrap();
-        }
     }
 
     #[task(binds = I2C1_ER, resources = [i2c1])]
