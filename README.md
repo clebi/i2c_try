@@ -11,5 +11,5 @@ The project is develop on a STM32F3DISCOVERY board.
 
 ## License
 
-Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  [https://www.apache.org/licenses/LICENSE-2.0][L1])
+Apache License, Version 2.0 ([LICENSE](LICENSE) or
+  https://www.apache.org/licenses/LICENSE-2.0)
