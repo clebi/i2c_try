@@ -16,7 +16,7 @@ use i2c::{I2c1, State};
 use stm32f3xx_hal::prelude::*;
 
 const I2C_LSM_ADDR: u8 = 0b0011110;
-const LSM_MAG_CONTINOUS: [u8; 2] = [0x02, 0b00];
+const LSM_MAG_CONTINUOUS: [u8; 2] = [0x02, 0b00];
 const LSM_ENABLE_WRITE: [u8; 2] = [0, 0b10010000];
 const LSM_MAG_TEMP_H_REG_WRITE: [u8; 1] = [0x31];
 // const LSM_MAG_TEMP_L_REG_WRITE: [u8; 1] = [0x32];
@@ -38,7 +38,7 @@ const TASKS: [I2cTask; 3] = [
         // Configure magnetic sensor operating mode to continuous mode
         mode: TaskMode::Write,
         addr: I2C_LSM_ADDR,
-        buf: &LSM_MAG_CONTINOUS,
+        buf: &LSM_MAG_CONTINUOUS,
     },
     I2cTask {
         // Enable temperature sensor

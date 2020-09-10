@@ -16,7 +16,7 @@ pub enum I2cError {
     ArbitrationLoss,
     Overrun,
     StateError, // unable to compute the stop state because previous state was not expected
-    TransferCompleteNoRead, // Tranfer complete status but nothing do do next
+    TransferCompleteNoRead, // Transfer complete status but nothing do do next
 }
 
 /// State of i2c communication.
@@ -60,7 +60,7 @@ impl I2c1 {
     /// # Arguments
     /// * `i2c` - i2c device.
     /// * `freq` - frequency for the device.
-    /// * `clocks` - systel clocks.
+    /// * `clocks` - system clocks.
     /// * `apb1` - APB1 register.
     pub fn new(
         i2c: I2C1,
@@ -398,9 +398,9 @@ impl I2c1 {
         self.state = State::TxSent;
     }
 
-    /// Is the device Budy ?
+    /// Is the device Busy ?
     /// # Returns
-    /// true if budy, false if not.
+    /// true if busy, false if not.
     pub fn is_busy(&mut self) -> bool {
         self.dev.isr.read().busy().bit()
     }
