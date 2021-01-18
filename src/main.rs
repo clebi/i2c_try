@@ -9,11 +9,15 @@ extern crate cortex_m_rt as rt;
 extern crate panic_semihosting;
 extern crate stm32f3xx_hal;
 
-mod i2c;
+// mod i2c.rs;
 
 use cortex_m_semihosting::hprintln;
-use i2c::{I2c1, State};
-use stm32f3xx_hal::prelude::*;
+use stm32f3xx_hal::{
+    i2cint::{I2cInt, State},
+    gpio::{gpiob, AF4},
+    pac::{I2C1},
+    prelude::*,
+};
 
 const I2C_LSM_ADDR: u8 = 0b0011110;
 const LSM_MAG_CONTINUOUS: [u8; 2] = [0x02, 0b00];
@@ -54,10 +58,12 @@ const TASKS: [I2cTask; 3] = [
     },
 ];
 
+type I2cInt1 = I2cInt<I2C1, (gpiob::PB6<AF4>, gpiob::PB7<AF4>)>;
+
 #[rtic::app(device = stm32f3xx_hal::pac, peripherals = true)]
 const APP: () = {
     struct Resources {
-        i2c1: I2c1,
+        i2c1: I2cInt1
     }
 
     #[init]
@@ -68,17 +74,22 @@ const APP: () = {
         let mut flash = device.FLASH.constrain();
         let clocks = rcc.cfgr.freeze(&mut flash.acr);
 
-        let mut gpiob: stm32f3xx_hal::gpio::gpiob::Parts = device.GPIOB.split(&mut rcc.ahb);
-        let scl = gpiob.pb6.into_af4(&mut gpiob.moder, &mut gpiob.afrl);
-        let sda = gpiob.pb7.into_af4(&mut gpiob.moder, &mut gpiob.afrl);
-
-        let mut i2c1 = I2c1::new(
-            device.I2C1,
-            (scl, sda),
-            400.khz().into(),
-            clocks,
-            &mut rcc.apb1,
+        let mut gpiob: gpiob::Parts = device.GPIOB.split(&mut rcc.ahb);
+        // let scl = gpiob.pb6.into_af4(&mut gpiob.moder, &mut gpiob.afrl);
+        // let sda = gpiob.pb7.into_af4(&mut gpiob.moder, &mut gpiob.afrl);
+        let pins = (
+            gpiob.pb6.into_af4(&mut gpiob.moder, &mut gpiob.afrl), // SCL
+            gpiob.pb7.into_af4(&mut gpiob.moder, &mut gpiob.afrl), // SDA
         );
+
+        // let mut i2c1 = I2c1::new(
+        //     device.I2C1,
+        //     (scl, sda),
+        //     400.khz().into(),
+        //     clocks,
+        //     &mut rcc.apb1,
+        // );
+        let mut i2c1 = I2cInt::new_int(device.I2C1, pins, 100.khz(), clocks, &mut rcc.apb1);
         i2c1.enable_interrupts();
         i2c1.enable();
 
@@ -101,7 +112,7 @@ const APP: () = {
                         for byte in task.buf {
                             hprintln!("idle: send buf: {:#08b}", byte).unwrap();
                         }
-                        cx.resources.i2c1.lock(|i2c1: &mut I2c1| {
+                        cx.resources.i2c1.lock(|i2c1: &mut I2cInt1| {
                             i2c1.write(task.addr, task.buf).unwrap();
                         });
                     }
@@ -113,8 +124,8 @@ const APP: () = {
                             task.addr
                         )
                         .unwrap();
-                        cx.resources.i2c1.lock(|i2c1: &mut I2c1| {
-                            i2c1.write_read(task.addr, task.buf, 1).unwrap();
+                        cx.resources.i2c1.lock(|i2c1: &mut I2cInt1| {
+                            i2c1.write_read(task.addr, task.buf, 2).unwrap();
                         });
                     }
                 }
@@ -122,7 +133,7 @@ const APP: () = {
             }
             cx.resources
                 .i2c1
-                .lock(|i2c1: &mut I2c1| match i2c1.last_error {
+                .lock(|i2c1: &mut I2cInt1| match i2c1.last_error {
                     Some(_) => {
                         hprintln!("idle: stop with error !!!").unwrap();
                         i2c1.reset_state();
@@ -134,7 +145,7 @@ const APP: () = {
                             task_running = false;
                         }
                         State::RxStop => {
-                            let buf = i2c1.get_rx_buf(1);
+                            let buf = i2c1.get_rx_buf(2);
                             for byte in buf {
                                 hprintln!("idle: rx stop: buf: {:#08b}", byte).unwrap();
                             }
@@ -151,7 +162,7 @@ const APP: () = {
 
     #[task(binds = I2C1_EV_EXTI23, resources = [i2c1])]
     fn i2c1_ev(cx: i2c1_ev::Context) {
-        let i2c1: &mut I2c1 = cx.resources.i2c1;
+        let i2c1: &mut I2cInt1 = cx.resources.i2c1;
         hprintln!("I2C1_EV: {:#016b}", i2c1.get_isr()).unwrap();
         i2c1.interrupt();
         hprintln!("i2c1 tx state = {}", i2c1.get_tx_state()).unwrap();
@@ -159,7 +170,7 @@ const APP: () = {
 
     #[task(binds = I2C1_ER, resources = [i2c1])]
     fn i2c1_er(cx: i2c1_er::Context) {
-        let i2c1: &mut I2c1 = cx.resources.i2c1;
+        let i2c1: &mut I2cInt1 = cx.resources.i2c1;
         hprintln!("I2C1 ER").unwrap();
         i2c1.interrupt();
     }
