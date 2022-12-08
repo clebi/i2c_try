@@ -1,19 +1,18 @@
 [package]
-authors = ["Clément Bizeau <clement.bizeau4@gmail.com>"]
-edition = "2018"
+authors = ["Clément Bizeau <devclbi@proton.me>"]
+edition = "2021"
 readme = "README.md"
-name = "cool"
+name = "i2c_try"
 version = "0.1.0"
 
 [dependencies]
-cortex-m = "0.6.3"
-cortex-m-rt = "0.6.12"
-cortex-m-semihosting = "0.3.5"
-cortex-m-rtic = "0.5.5"
-panic-semihosting = "0.5.3"
-defmt = "0.1.2"
-defmt-rtt = "0.1.0"
-heapless = "0.5.6"
+cortex-m =  {version = "0.7.6", features = ["critical-section-single-core"]}
+cortex-m-rt = "0.7.2"
+cortex-m-semihosting = "0.5.0"
+cortex-m-rtic = "1.1.3"
+panic-semihosting = "0.6.0"
+rtt-target = { version = "0.3.1", features = ["cortex-m"] }
+heapless = "0.7.16"
 
 [dependencies.stm32f3xx-hal]
 path = "../stm32f3xx-hal"
@@ -21,42 +20,15 @@ features = ["stm32f303xc", "rt"]
 
 [dependencies.cast]
 default-features = false
-version = "0.2.2"
-
-[features]
-# set logging levels here
-default = [
-  "defmt-info",
-  # "dependency-a/defmt-trace",
-]
-
-# do NOT modify these features
-defmt-default = []
-defmt-trace = []
-defmt-debug = []
-defmt-info = []
-defmt-warn = []
-defmt-error = []
+version = "0.3.0"
 
 # this lets you use `cargo fix`!
 [[bin]]
-name = "cool"
+name = "i2c_try"
 test = false
 bench = false
 
-[profile.dev]
-codegen-units = 1
-debug = 2
-debug-assertions = true
-incremental = false
-opt-level = 3
-overflow-checks = true
-
 [profile.release]
 codegen-units = 1
-debug = 2
-debug-assertions = false
-incremental = false
-lto = 'fat'
-opt-level = 3
-overflow-checks = false
+debug = true
+lto = true
