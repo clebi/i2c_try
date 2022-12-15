@@ -12,10 +12,10 @@ extern crate stm32f3xx_hal;
 
 #[rtic::app(device = stm32f3xx_hal::pac, peripherals = true)]
 mod app {
+    use defmt_rtt as _;
     use core::convert::TryInto;
     use cast::u16;
     use heapless::String;
-    use rtt_target::{rprintln, rtt_init_print};
     use stm32f3xx_hal::{
         gpio::{gpiob, Alternate, Gpiob, OpenDrain, Pin, U},
         i2cint::{I2cInt, State},
@@ -81,14 +81,13 @@ mod app {
 
     #[init]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
-        rtt_init_print!();
         let device: stm32f3xx_hal::pac::Peripherals = cx.device;
         let mut rcc = device.RCC.constrain();
 
         let mut flash = device.FLASH.constrain();
         let clocks = rcc.cfgr.freeze(&mut flash.acr);
 
-        rprintln!("init: configure gpio for i2c1");
+        defmt::info!("init: configure gpio for i2c1");
         let mut gpiob: gpiob::Parts = device.GPIOB.split(&mut rcc.ahb);
         let pins = (
             gpiob
@@ -106,7 +105,7 @@ mod app {
             clocks,
             &mut rcc.apb1,
         );
-        rprintln!("init: enable interrupts and device for i2c1");
+        defmt::info!("init: enable interrupts and device for i2c1");
         i2c1.enable_interrupts();
         i2c1.enable();
 
@@ -123,10 +122,10 @@ mod app {
                 match task.mode {
                     TaskMode::Write => {
                         task_running = true;
-                        rprintln!("idle: write to i2c1 device :{:08b}", task.addr);
-                        rprintln!("idle: task : {} send to {:08b} !!!", task_index, task.addr);
+                        defmt::info!("idle: write to i2c1 device :{:08b}", task.addr);
+                        defmt::info!("idle: task : {} send to {:08b} !!!", task_index, task.addr);
                         for byte in task.buf {
-                            rprintln!("idle: send buf: {:08b}", byte);
+                            defmt::info!("idle: send buf: {:08b}", byte);
                         }
                         cx.shared.i2c1.lock(|i2c1: &mut I2cInt1| {
                             i2c1.write(task.addr, task.buf).unwrap();
@@ -134,8 +133,8 @@ mod app {
                     }
                     TaskMode::WriteRead => {
                         task_running = true;
-                        rprintln!("idle: write_read to i2c1 device : {:08b}", task.addr);
-                        rprintln!(
+                        defmt::info!("idle: write_read to i2c1 device : {:08b}", task.addr);
+                        defmt::info!(
                             "idle: task : write read {} bytes from {:08b} !!!",
                             task_index,
                             task.addr
@@ -151,7 +150,7 @@ mod app {
                 .i2c1
                 .lock(|i2c1: &mut I2cInt1| match i2c1.last_error {
                     Some(_) => {
-                        rprintln!("idle: stop with error !!!");
+                        defmt::info!("idle: stop with error !!!");
                         i2c1.reset_state();
                     }
                     None => match i2c1.get_tx_state() {
@@ -163,16 +162,16 @@ mod app {
                         State::RxStop => {
                             let buf = i2c1.get_rx_buf(2);
                             for byte in buf {
-                                rprintln!("idle: rx stop: buf: {:08b}", byte);
+                                defmt::info!("idle: rx stop: buf: {:08b}", byte);
                             }
-                            rprintln!("received! {} {}", buf[0], buf[1]);
+                            defmt::info!("received! {} {}", buf[0], buf[1]);
                             let t = temp(buf[1], buf[0]);
-                            rprintln!("temp: {}", t);
+                            defmt::info!("temp: {}", t);
                             i2c1.reset_state();
                             task_running = false;
                         }
                         _ => {
-                            rprintln!("idle: isr state not managed");
+                            defmt::info!("idle: isr state not managed");
                         }
                     },
                 });
@@ -182,41 +181,41 @@ mod app {
     #[task(binds = I2C1_EV_EXTI23, shared = [i2c1])]
     fn i2c1_ev(mut cx: i2c1_ev::Context) {
         cx.shared.i2c1.lock(|i2c1| {
-            rprintln!("I2C1_EV: {:016b}", i2c1.get_isr());
+            defmt::info!("I2C1_EV: {:016b}", i2c1.get_isr());
             let isr = i2c1.interrupt();
             match isr {
                 Ok(state) => {
                     let mut s: String<16> = String::new();
                     core::fmt::write(&mut s, format_args!("{}", state)).unwrap();
-                    rprintln!("i2c1 isr state = {}", s);
+                    defmt::info!("i2c1 isr state = {=str}", s);
                 },
                 Err(error) => {
                     let mut s: String<16> = String::new();
                     core::fmt::write(&mut s, format_args!("{}", error)).unwrap();
-                    rprintln!("i2c1 isr error = {}", s);
+                    defmt::info!("i2c1 isr error = {=str}", s);
                 }
             }
             let mut s: String<16> = String::new();
             core::fmt::write(&mut s, format_args!("{}", i2c1.get_tx_state())).unwrap();
-            rprintln!("i2c1 tx state = {}", s);
+            defmt::info!("i2c1 tx state = {=str}", s);
         });
     }
 
     #[task(binds = I2C1_ER, shared = [i2c1])]
     fn i2c1_er(mut cx: i2c1_er::Context) {
         cx.shared.i2c1.lock(|i2c1| {
-            rprintln!("I2C1_ER: {:08b}", i2c1.get_isr());
+            defmt::info!("I2C1_ER: {:08b}", i2c1.get_isr());
             let isr = i2c1.interrupt();
             match isr {
                 Ok(state) => {
                     let mut s: String<16> = String::new();
                     core::fmt::write(&mut s, format_args!("{}", state)).unwrap();
-                    rprintln!("i2c1 isr state = {}", s);
+                    defmt::info!("i2c1 isr state = {=str}", s);
                 },
                 Err(error) => {
                     let mut s: String<16> = String::new();
                     core::fmt::write(&mut s, format_args!("{}", error)).unwrap();
-                    rprintln!("i2c1 isr error = {}", s);
+                    defmt::info!("i2c1 isr error = {=str}", s);
                 }
             }
         })
