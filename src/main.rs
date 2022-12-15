@@ -12,9 +12,10 @@ extern crate stm32f3xx_hal;
 
 #[rtic::app(device = stm32f3xx_hal::pac, peripherals = true)]
 mod app {
-    use rtt_target::{rtt_init_print, rprintln};
     use core::convert::TryInto;
+    use cast::u16;
     use heapless::String;
+    use rtt_target::{rprintln, rtt_init_print};
     use stm32f3xx_hal::{
         gpio::{gpiob, Alternate, Gpiob, OpenDrain, Pin, U},
         i2cint::{I2cInt, State},
@@ -26,7 +27,7 @@ mod app {
     const I2C_LSM_ADDR: u8 = 0b0011110;
     const LSM_MAG_CONTINUOUS: [u8; 2] = [0x02, 0b00];
     const LSM_ENABLE_WRITE: [u8; 2] = [0, 0b10010000];
-    const LSM_MAG_TEMP_H_REG_WRITE: [u8; 1] = [0x31];
+    const LSM_MAG_TEMP_H_REG_WRITE: [u8; 1] = [0xB1];
     // const LSM_MAG_TEMP_L_REG_WRITE: [u8; 1] = [0x32];
 
     enum TaskMode {
@@ -135,7 +136,7 @@ mod app {
                         task_running = true;
                         rprintln!("idle: write_read to i2c1 device : {:08b}", task.addr);
                         rprintln!(
-                            "idle: task : {} write read from {:08b} !!!",
+                            "idle: task : write read {} bytes from {:08b} !!!",
                             task_index,
                             task.addr
                         );
@@ -164,6 +165,9 @@ mod app {
                             for byte in buf {
                                 rprintln!("idle: rx stop: buf: {:08b}", byte);
                             }
+                            rprintln!("received! {} {}", buf[0], buf[1]);
+                            let t = temp(buf[1], buf[0]);
+                            rprintln!("temp: {}", t);
                             i2c1.reset_state();
                             task_running = false;
                         }
@@ -178,8 +182,20 @@ mod app {
     #[task(binds = I2C1_EV_EXTI23, shared = [i2c1])]
     fn i2c1_ev(mut cx: i2c1_ev::Context) {
         cx.shared.i2c1.lock(|i2c1| {
-            rprintln!("I2C1_EV: {:08b}", i2c1.get_isr());
-            i2c1.interrupt();
+            rprintln!("I2C1_EV: {:016b}", i2c1.get_isr());
+            let isr = i2c1.interrupt();
+            match isr {
+                Ok(state) => {
+                    let mut s: String<16> = String::new();
+                    core::fmt::write(&mut s, format_args!("{}", state)).unwrap();
+                    rprintln!("i2c1 isr state = {}", s);
+                },
+                Err(error) => {
+                    let mut s: String<16> = String::new();
+                    core::fmt::write(&mut s, format_args!("{}", error)).unwrap();
+                    rprintln!("i2c1 isr error = {}", s);
+                }
+            }
             let mut s: String<16> = String::new();
             core::fmt::write(&mut s, format_args!("{}", i2c1.get_tx_state())).unwrap();
             rprintln!("i2c1 tx state = {}", s);
@@ -190,7 +206,27 @@ mod app {
     fn i2c1_er(mut cx: i2c1_er::Context) {
         cx.shared.i2c1.lock(|i2c1| {
             rprintln!("I2C1_ER: {:08b}", i2c1.get_isr());
-            i2c1.interrupt();
+            let isr = i2c1.interrupt();
+            match isr {
+                Ok(state) => {
+                    let mut s: String<16> = String::new();
+                    core::fmt::write(&mut s, format_args!("{}", state)).unwrap();
+                    rprintln!("i2c1 isr state = {}", s);
+                },
+                Err(error) => {
+                    let mut s: String<16> = String::new();
+                    core::fmt::write(&mut s, format_args!("{}", error)).unwrap();
+                    rprintln!("i2c1 isr error = {}", s);
+                }
+            }
         })
+    }
+
+    /// Temperature sensor measurement
+    ///
+    /// - Resolution: 12-bit
+    /// - Range: [-40, +85]
+    pub fn temp(lsb: u8, msb: u8) -> i16 {
+        (u16(lsb) + (u16(msb) << 8)) as i16 >> 4
     }
 }
