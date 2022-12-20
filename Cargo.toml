@@ -29,6 +29,12 @@ name = "i2c_try"
 test = false
 bench = false
 
+[profile.dev]
+opt-level = 0
+codegen-units = 1
+debug = true
+lto = true
+
 [profile.release]
 codegen-units = 1
 debug = true

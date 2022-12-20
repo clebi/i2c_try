@@ -98,7 +98,7 @@ mod app {
                 .into_af_open_drain(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrl), // SDA
         );
 
-        let mut i2c1 = I2cInt::new_int(
+        let mut i2c1 = I2cInt::new(
             device.I2C1,
             pins,
             100.kHz().try_into().unwrap(),
@@ -133,7 +133,7 @@ mod app {
                     }
                     TaskMode::WriteRead => {
                         task_running = true;
-                        defmt::info!("idle: write_read to i2c1 device : {:08b}", task.addr);
+                        defmt::info!("idle: write_read to i2c1 device : {:08b}, write: {:08b}", task.addr, task.buf[0]);
                         defmt::info!(
                             "idle: task : write read {} bytes from {:08b} !!!",
                             task_index,
@@ -148,12 +148,12 @@ mod app {
             }
             cx.shared
                 .i2c1
-                .lock(|i2c1: &mut I2cInt1| match i2c1.last_error {
+                .lock(|i2c1: &mut I2cInt1| match i2c1.get_last_error() {
                     Some(_) => {
                         defmt::info!("idle: stop with error !!!");
                         i2c1.reset_state();
                     }
-                    None => match i2c1.get_tx_state() {
+                    None => match i2c1.get_state() {
                         State::Idle => {}
                         State::TxStop => {
                             i2c1.reset_state();
@@ -182,7 +182,7 @@ mod app {
     fn i2c1_ev(mut cx: i2c1_ev::Context) {
         cx.shared.i2c1.lock(|i2c1| {
             defmt::info!("I2C1_EV: {:016b}", i2c1.get_isr());
-            let isr = i2c1.interrupt();
+            let isr = i2c1.react_on_interrupt();
             match isr {
                 Ok(state) => {
                     let mut s: String<16> = String::new();
@@ -196,7 +196,7 @@ mod app {
                 }
             }
             let mut s: String<16> = String::new();
-            core::fmt::write(&mut s, format_args!("{}", i2c1.get_tx_state())).unwrap();
+            core::fmt::write(&mut s, format_args!("{}", i2c1.get_state())).unwrap();
             defmt::info!("i2c1 tx state = {=str}", s);
         });
     }
@@ -205,7 +205,7 @@ mod app {
     fn i2c1_er(mut cx: i2c1_er::Context) {
         cx.shared.i2c1.lock(|i2c1| {
             defmt::info!("I2C1_ER: {:08b}", i2c1.get_isr());
-            let isr = i2c1.interrupt();
+            let isr = i2c1.react_on_interrupt();
             match isr {
                 Ok(state) => {
                     let mut s: String<16> = String::new();
@@ -225,7 +225,7 @@ mod app {
     ///
     /// - Resolution: 12-bit
     /// - Range: [-40, +85]
-    pub fn temp(lsb: u8, msb: u8) -> i16 {
-        (u16(lsb) + (u16(msb) << 8)) as i16 >> 4
+    pub fn temp(lsb: u8, msb: u8) -> f32 {
+        ((u16(msb) << 8 | u16(lsb)) as i16 >> 4) as f32 / 8.0 + 20.0
     }
 }
