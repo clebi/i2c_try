@@ -13,6 +13,7 @@ extern crate stm32f3xx_hal;
 #[rtic::app(device = stm32f3xx_hal::pac, peripherals = true)]
 mod app {
     use defmt_rtt as _;
+    use rtic::Mutex;
     use core::convert::TryInto;
     use cast::u16;
     use heapless::String;
@@ -21,8 +22,9 @@ mod app {
         i2cint::{I2cInt, State},
         pac::I2C1,
         prelude::*,
-        rcc::RccExt,
+        rcc::RccExt, dma::dma1::Channels, hal::blocking::i2c,
     };
+    use rtic::mutex::prelude::*;
 
     const I2C_LSM_ADDR: u8 = 0b0011110;
     const LSM_MAG_CONTINUOUS: [u8; 2] = [0x02, 0b00];
@@ -73,6 +75,7 @@ mod app {
 
     #[shared]
     struct Shared {
+        dma1: Channels,
         i2c1: I2cInt1,
     }
 
@@ -109,10 +112,19 @@ mod app {
         i2c1.enable_interrupts();
         i2c1.enable();
 
-        (Shared { i2c1 }, Local {}, init::Monotonics())
+        let dma1 = device.DMA1.split(&mut rcc.ahb);
+
+        (Shared { dma1, i2c1 }, Local {}, init::Monotonics())
     }
 
-    #[idle(shared = [i2c1])]
+    fn write_all(task: &I2cTask, i2c1: &mut impl Mutex<T = I2cInt1>, dma1: &mut impl Mutex<T = Channels>)
+    {
+        (i2c1, dma1).lock(|i2c1, &mut dma1| {
+            i2c1.write_all(task.addr, task.buf, dma1.ch6);
+        });
+    }
+
+    #[idle(shared = [i2c1, dma1])]
     fn idle(mut cx: idle::Context) -> ! {
         let mut task_index = 0;
         let mut task_running = false;
@@ -127,9 +139,13 @@ mod app {
                         for byte in task.buf {
                             defmt::info!("idle: send buf: {:08b}", byte);
                         }
-                        cx.shared.i2c1.lock(|i2c1: &mut I2cInt1| {
-                            i2c1.write(task.addr, task.buf).unwrap();
+                        cx.shared.dma1.lock(|dma1| {
+                            let c6 = dma1.ch6;
+                            cx.shared.i2c1.lock(|&mut i2c1| {
+                                i2c1.write_all(task.addr, task.buf, c6);
+                            });
                         });
+                        write_all(task, &mut cx.shared.i2c1, &mut cx.shared.dma1);
                     }
                     TaskMode::WriteRead => {
                         task_running = true;
